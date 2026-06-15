@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# graphify runtime artifacts (these live in each project's graphify-out/, not here)
+graphify-out/
+naming_tasks.json
+names.json
+.graphify_python
+.graphify_labels.json
+.graphify_semantic_map.json
+*.prelabel.bak
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
