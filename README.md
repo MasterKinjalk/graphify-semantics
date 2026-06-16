@@ -51,10 +51,10 @@ You can't query what you can't name. `graphify-semantics` closes that gap.
 1. **Names every generic community** — reads each cluster's member nodes, file-type mix, and source files, then writes a 2–5 word Title Case name (`Mask Tracing UI`, `Training Pipeline`).
 2. **Upgrades vague connections** — replaces fuzzy/`INFERRED` edges with a precise snake_case predicate (`configures`, `validates`, `persists`, `depends_on`, `returns`, `documents`, …), **preserving the original** so the audit trail stays honest. Structural edges (`calls`, `imports`, `method`, `inherits`, `contains`) are left untouched.
 3. **Cleans cryptic node labels** *(optional, `--nodes`)* — renames things like `cfg`/`device` while keeping the old token as a searchable alias.
-4. **Regenerates outputs** — rebuilds `GRAPH_REPORT.md` and re-runs `graphify export` for whatever formats the project already had (`wiki`, `obsidian`, `html`), so wiki note filenames, `[[wikilinks]]`, `community/…` tags, and connection labels all update consistently.
-5. **Mirrors to your vault** — points you at (or runs) your existing `sync-graphify-vault.ps1` so the Obsidian vault reflects the new names.
+4. **Regenerates outputs** — rebuilds `GRAPH_REPORT.md` and **always (re)builds the `wiki` export** (per-community notes) so the renamed labels actually reach Obsidian; `html`/`obsidian` are refreshed only if the project already had them. Wiki note filenames, `[[wikilinks]]`, `community/…` tags, and connection labels all update consistently.
+5. **Mirrors to your vault** *(optional)* — copy `GRAPH_REPORT.md` + `wiki/` into the vault's project folder. Never mirror the whole `graphify-out`, and never the per-node `obsidian/` export.
 
-The naming is done **in-agent by Claude** — never offloaded to a small local model — so it uses session-level understanding of the codebase, not keyword guesses.
+The naming is done **in-agent by Claude** — never offloaded to a small local model — so it uses session-level understanding of the codebase, not keyword guesses. Identical community names are auto-deduplicated so wiki filenames never collide.
 
 ## Why this makes a graph queryable
 
@@ -116,7 +116,7 @@ See [`examples/walkthrough.md`](examples/walkthrough.md) for a full annotated ru
 
 **3 — Improve Claude's retrieval over your code.** Because `graphify query` matches on labels, naming the graph measurably improves answer quality for "how does X work / what depends on Y / trace the data flow through Z."
 
-**4 — Tidy every project at once.** Loop the engine over `D:\*\graphify-out` and `F:\*\graphify-out`, then sync the vault once — a whole portfolio of graphs cleaned in one pass. Idempotent, so re-running only touches what's still generic.
+**4 — Clean a big graph, or several repos.** For a graph with hundreds of communities, chunk the naming across general-purpose subagents (each writes a `names_part_*.json`) and combine with `merge`. Working across several repos? Run the per-project pass in each repo you choose (optionally one subagent per repo). It's idempotent, so re-running only touches what's still generic — and it never scans your whole drive.
 
 **5 — Sharper relationships for GraphRAG / Neo4j.** Precise predicates (`configures`, `persists`, `depends_on`) make the exported `graph.json` / Cypher far more useful for downstream retrieval than a sea of `references`.
 
@@ -165,6 +165,7 @@ These are enforced by the skill and the engine:
 3. **Honest audit trail.** Vague/`INFERRED` edges are refined; faithful structural edges are left alone; originals are always preserved.
 4. **Idempotent.** Re-running only processes items still generic.
 5. **Reversible.** Pre-label backups (`*.prelabel.bak`) plus the audit map make `revert` a one-liner.
+6. **`wiki`, not `obsidian`, for a vault.** Mirror `GRAPH_REPORT.md` + the per-community `wiki/` only — never the whole `graphify-out`, never the per-node `obsidian/` export.
 
 ## CLI reference
 
@@ -172,11 +173,12 @@ These are enforced by the skill and the engine:
 
 | Subcommand | What it does |
 | --- | --- |
-| `resolve-python [path]` | Find a Python that can `import graphify`; cache it in `.graphify_python`. |
-| `plan [path] [--nodes] [--no-relations] [--max-relations N] [--force]` | Detect generic communities, vague connections, cryptic nodes → `naming_tasks.json`. |
-| `apply [path] [--names FILE]` | Apply Claude's `names.json` to `graph.json` + labels; write the audit map. |
-| `regenerate [path]` | Rebuild `GRAPH_REPORT.md` + re-export `wiki`/`obsidian`/`html`. |
+| `resolve-python [path]` | Find a Python that can `import graphify` (probes `C:\Python313` + the uv venv); cache it in `.graphify_python`. |
+| `plan [path] [--nodes] [--no-relations] [--max-relations N] [--max-nodes N] [--force]` | Detect generic communities, vague connections, cryptic nodes → `naming_tasks.json`. |
+| `apply [path] [--names FILE]` | Apply Claude's `names.json` to `graph.json` + labels; **auto-dedupes community names**; write the audit map. |
+| `regenerate [path]` | Rebuild `GRAPH_REPORT.md` + **always (re)export `wiki`** (refresh `html`/`obsidian` only if already present). |
 | `status [path]` | Show how many communities are named and how many connections upgraded. |
+| `merge [path] [--clean]` | Combine `names_part_*.json` (chunked naming) → deduped `names.json`; `--clean` removes scratch. |
 | `revert [path]` | Restore `graph.json` + labels from the pre-label backups. |
 
 `path` defaults to `./graphify-out`.

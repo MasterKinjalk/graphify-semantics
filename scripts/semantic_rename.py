@@ -15,6 +15,7 @@ Subcommands
   regenerate  Rebuild GRAPH_REPORT.md + wiki/obsidian/html from the updated
               graph + labels (best effort; text-substitution fallback).
   status      Show how many communities/relations are still generic.
+  merge       Merge names_part_*.json (chunked naming) -> names.json, deduped.
   revert      Undo the last apply using the audit map.
   resolve-python  Find a Python that can `import graphify`; write .graphify_python.
 
@@ -150,15 +151,8 @@ def cmd_resolve_python(args) -> None:
         if cand and _imports_graphify(cand):
             print(cand)
             return
-    # 2. probe candidates
-    candidates = [
-        sys.executable,
-        shutil.which("python"),
-        shutil.which("python3"),
-        r"C:\Python313\python.exe",  # RootQuant exception (see memory)
-        os.path.expanduser(r"~\AppData\Roaming\uv\tools\graphifyy\Scripts\python.exe"),
-    ]
-    for c in candidates:
+    # 2. probe candidates (shared with regenerate's _python_for)
+    for c in _interpreter_candidates():
         if c and _imports_graphify(c):
             mark.write_text(c, encoding="utf-8")
             print(c)
@@ -178,6 +172,20 @@ def _imports_graphify(py: str) -> bool:
         return r.returncode == 0
     except Exception:  # noqa: BLE001
         return False
+
+
+def _interpreter_candidates() -> list[str]:
+    """Python interpreters to probe for `import graphify`, best-effort order.
+    Shared by `resolve-python` and regenerate's `_python_for` so BOTH find the
+    same interpreter - notably C:\\Python313 and the uv-tool venv on Windows,
+    where a bare `python` is often absent or can't import graphify."""
+    return [
+        sys.executable,
+        shutil.which("python"),
+        shutil.which("python3"),
+        r"C:\Python313\python.exe",
+        os.path.expanduser(r"~\AppData\Roaming\uv\tools\graphifyy\Scripts\python.exe"),
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +317,40 @@ def cmd_plan(args) -> None:
 # apply
 # --------------------------------------------------------------------------- #
 
+def _dedup_community_names(new_names: dict, existing_labels: dict) -> tuple[dict, int]:
+    """Make every community name unique before it becomes a wiki *filename*.
+    A name is 'taken' if a non-generic label on a community we are NOT renaming
+    uses it, or it was already assigned earlier this pass. On collision, suffix
+    ` (<cid>)`. Deterministic (cids in numeric order)."""
+    def _cid_key(k):
+        try:
+            return (0, int(k))
+        except (TypeError, ValueError):
+            return (1, str(k))
+    taken = {
+        str(v).strip()
+        for cid, v in (existing_labels or {}).items()
+        if str(cid) not in new_names and not is_generic_community(v)
+    }
+    out: dict = {}
+    collisions = 0
+    for cid in sorted(new_names, key=_cid_key):
+        name = str(new_names[cid]).strip()
+        if not name or is_generic_community(name):
+            out[cid] = new_names[cid]
+            continue
+        final = name
+        if final in taken:
+            final, n = f"{name} ({cid})", 2
+            while final in taken:
+                final = f"{name} ({cid}-{n})"
+                n += 1
+            collisions += 1
+        taken.add(final)
+        out[cid] = final
+    return out, collisions
+
+
 def cmd_apply(args) -> None:
     out = _out_dir(args.path)
     names = _read_json(Path(args.names) if args.names else out / "names.json")
@@ -329,8 +371,11 @@ def cmd_apply(args) -> None:
         _backup(out / LABELS)
 
     # ---- communities ----------------------------------------------------- #
+    # Community names become Obsidian wiki *filenames* - dedup so identical
+    # sibling-cluster names don't collide and silently overwrite each other.
+    comm_names, n_dups = _dedup_community_names(names.get("communities") or {}, labels)
     n_comm = 0
-    for cid, name in (names.get("communities") or {}).items():
+    for cid, name in comm_names.items():
         name = str(name).strip()
         if not name or is_generic_community(name):
             continue
@@ -383,6 +428,8 @@ def cmd_apply(args) -> None:
     _write_json(out / AUDIT, audit)
 
     print(f"APPLIED: {n_comm} community names, {n_rel} relations, {n_node} node labels")
+    if n_dups:
+        print(f"  disambiguated {n_dups} colliding community name(s) with an id suffix")
     print(f"  graph.json + {LABELS} updated; audit -> {AUDIT}")
     print("Next: run `regenerate` to rebuild the report + wiki, then sync the vault.")
 
@@ -412,13 +459,17 @@ def cmd_regenerate(args) -> None:
     labels = _read_json(out / LABELS, {}) or {}
     ok_report = _regen_report(out, py, labels) if py else False
 
-    # CLI exporters - only regen the formats this project already produced
+    # CLI exporters. wiki is the vault-facing, per-community format, so ALWAYS
+    # (re)build it - even if this project never had one - otherwise renamed
+    # labels never reach Obsidian (the #1 silent failure this skill prevents).
+    # html/obsidian are only refreshed if already present; we never newly
+    # create obsidian/ (it is one markdown file PER NODE).
     did = []
-    for fmt, marker in [("html", "graph.html"),
-                        ("wiki", "wiki"),
-                        ("obsidian", "obsidian")]:
-        if (out / marker).exists() and py:
-            if _run_export(py, project_root, fmt):
+    if py:
+        if _run_export(py, project_root, "wiki"):
+            did.append("wiki")
+        for fmt, marker in [("html", "graph.html"), ("obsidian", "obsidian")]:
+            if (out / marker).exists() and _run_export(py, project_root, fmt):
                 did.append(fmt)
 
     if not ok_report:
@@ -426,7 +477,8 @@ def cmd_regenerate(args) -> None:
 
     print(f"REGENERATE: report={'api' if ok_report else 'text-fallback'}; "
           f"exports={did or 'none'}")
-    print("Now mirror graphify-out into the vault (your sync-graphify-vault.ps1).")
+    print("To mirror into a notes vault: copy GRAPH_REPORT.md + wiki/ ONLY - never "
+          "the whole graphify-out, never obsidian/ (one markdown file per node).")
 
 
 def _python_for(out: Path) -> str | None:
@@ -435,7 +487,7 @@ def _python_for(out: Path) -> str | None:
         c = mark.read_text(encoding="utf-8").strip()
         if c and _imports_graphify(c):
             return c
-    for c in [shutil.which("python"), shutil.which("python3"), sys.executable]:
+    for c in _interpreter_candidates():
         if c and _imports_graphify(c):
             mark.write_text(c, encoding="utf-8")
             return c
@@ -581,6 +633,47 @@ def cmd_revert(args) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# merge (combine chunked names_part_*.json from large-graph naming)
+# --------------------------------------------------------------------------- #
+
+def cmd_merge(args) -> None:
+    out = _out_dir(args.path)
+    parts = sorted(out.glob("names_part_*.json"))
+    if not parts:
+        sys.exit(f"ERROR: no names_part_*.json in {out}. Nothing to merge.")
+    communities: dict = {}
+    relations: dict = {}
+    nodes: dict = {}
+    for p in parts:
+        d = _read_json(p, {}) or {}
+        if any(k in d for k in ("communities", "relations", "nodes")):
+            communities.update(d.get("communities") or {})
+            relations.update(d.get("relations") or {})
+            nodes.update(d.get("nodes") or {})
+        else:
+            communities.update(d)  # a flat {cid: name} community map
+    labels = _read_json(out / LABELS, {}) or {}
+    communities, n_dups = _dedup_community_names(communities, labels)
+    _write_json(out / "names.json",
+                {"communities": communities, "relations": relations, "nodes": nodes})
+    print(f"MERGED {len(parts)} part file(s) -> names.json: "
+          f"{len(communities)} communities, {len(relations)} relations, "
+          f"{len(nodes)} nodes")
+    if n_dups:
+        print(f"  disambiguated {n_dups} colliding community name(s)")
+    if args.clean:
+        removed = 0
+        for pat in ("names_part_*.json", "chunk_*.json", "_dump_*.txt"):
+            for f in out.glob(pat):
+                try:
+                    f.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        print(f"  cleaned {removed} scratch file(s)")
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -609,6 +702,11 @@ def main() -> None:
     p = sub.add_parser("regenerate"); add_path(p); p.set_defaults(fn=cmd_regenerate)
     p = sub.add_parser("status"); add_path(p); p.set_defaults(fn=cmd_status)
     p = sub.add_parser("revert"); add_path(p); p.set_defaults(fn=cmd_revert)
+
+    p = sub.add_parser("merge"); add_path(p)
+    p.add_argument("--clean", action="store_true",
+                   help="also delete scratch: names_part_*/chunk_*/_dump_*")
+    p.set_defaults(fn=cmd_merge)
 
     args = ap.parse_args()
     args.fn(args)
